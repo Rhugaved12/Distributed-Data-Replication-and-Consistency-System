@@ -43,7 +43,7 @@ public class Server {
             if (i != pid) { // Assuming 'pid' is the ID of the current server
                 EchoClient client = new EchoClient(i);
                 client.connect(hostNames[i], ports[i]);
-                client.handleMessages();
+                // client.handleMessages();
                 clients.add(client); // Add the client to the list
             }
         }
@@ -78,7 +78,7 @@ class Process {
     private Map<String, PriorityQueue<String>> queuedMessages = new HashMap<>();
 
     // Map to store clocks for each object
-    private Map<String, Integer> objectClocks = new HashMap<>();
+    public Map<String, Integer> objectClocks = new HashMap<>();
 
     public Process(int pid) {
         this.pid = pid; // pid takes values between 0 to 3
@@ -143,21 +143,15 @@ class Process {
                 System.out.println("Object Name: " + objectName);
                 System.out.println("Message Content: " + messageContent);
 
-                // Store the message in the server using objectClocks
-                storeClientMessage(objectName, messageContent);
-
-                // Retrieve stored messages for the objectName
-                List<String> storedMessagesList = getClientMessages(objectName);
-                String storedMessagesString = convertClientMessagesAsString(storedMessagesList);
-
                 // Update the clock value for the object after storing the message
-                int newClockValue = objectClocks.get(objectName);
+                int newClockValue = objectClocks.getOrDefault(objectName, 0);
                 String serverMessage = "SERVER&" + Integer.toString(this.pid) + "#W#" + Integer.toString(newClockValue)
                         + "#" + objectName
                         + "#" + messageContent;
-
+                System.err.println("ServerMessage: " + serverMessage);
                 // Send messages only to 2 other replicas
                 int serverIndex = Math.abs(djb2Hash(objectName)) % 7;
+                int noOfReplicaReplies = 0;
                 System.err.println("Sending Client message to other servers: " + serverIndex);
                 for (int i = 0; i < this.connectedServers.clients.size(); i++) {
                     int index = i;
@@ -167,12 +161,29 @@ class Process {
                     EchoClient client = this.connectedServers.clients.get(i);
                     if ((index == (serverIndex + 2) % 7) || (index == (serverIndex + 4) % 7)) {
                         System.err.println("Sending Message to : " + client.pid + " with index: " + index);
-                        client.sendMessage(serverMessage);
+                        boolean reply = client.sendMessage(serverMessage);
+                        if (reply == true) {
+                            noOfReplicaReplies++;
+                        }
                     }
                 }
 
-                // Send only the stored messages content back to the client
-                out.println(storedMessagesString);
+                if (noOfReplicaReplies > 0) {
+                    // Successfully saved the message at atleast 1 other replica + saving the
+                    // message on this server = Total 2 replicas
+                    // Store the message in the server using objectClocks
+                    storeClientMessage(objectName, messageContent);
+
+                    // Retrieve stored messages for the objectName
+                    List<String> storedMessagesList = getClientMessages(objectName);
+                    String storedMessagesString = convertClientMessagesAsString(storedMessagesList);
+
+                    // Send only the stored messages content back to the client
+                    out.println(storedMessagesString);
+                } else {
+                    System.err.println("Couldn't save the message on other replica. Not saving the message");
+                    out.println("Error");
+                }
 
             } else if (parts[1].equals("R")) {
                 int clientPid = Integer.parseInt(parts[0]);
@@ -193,6 +204,7 @@ class Process {
             }
         } catch (Exception e) {
             System.err.println("[handleClientMessages] Exception: " + e.getMessage());
+            e.printStackTrace();
             out.println("Error");
         }
     }
@@ -248,57 +260,64 @@ class Process {
 
         // Parse the content string
         // Format: for Write: pid#W#Clock_Value#Object_name#content
-        String[] parts = content.split("#");
-        if (parts[1].equals("W")) {
-            int clientPid = Integer.parseInt(parts[0]);
-            int clockValue = Integer.parseInt(parts[2]);
-            String objectName = parts[3];
-            String messageContent = parts[4];
+        try {
+            String[] parts = content.split("#");
+            if (parts[1].equals("W")) {
+                int clientPid = Integer.parseInt(parts[0]);
+                int clockValue = Integer.parseInt(parts[2]);
+                String objectName = parts[3];
+                String messageContent = parts[4];
 
-            // Example: Print the parsed values
-            System.out.println("Client message from PID " + clientPid + ":");
-            System.out.println("Clock Value: " + clockValue);
-            System.out.println("Object Name: " + objectName);
-            System.out.println("Message Content: " + messageContent);
+                // Example: Print the parsed values
+                System.out.println("Client message from PID " + clientPid + ":");
+                System.out.println("Clock Value: " + clockValue);
+                System.out.println("Object Name: " + objectName);
+                System.out.println("Message Content: " + messageContent);
 
-            // Get stored client messages in the given object
-            List<String> previouslyStoredClientMessagesList = getClientMessages(objectName);
+                // Get stored client messages in the given object
+                List<String> previouslyStoredClientMessagesList = getClientMessages(objectName);
 
-            String lastStoredMessage = null; // Initialize to null
+                String lastStoredMessage = null; // Initialize to null
 
-            if (!previouslyStoredClientMessagesList.isEmpty()) {
-                lastStoredMessage = previouslyStoredClientMessagesList
-                        .get(previouslyStoredClientMessagesList.size() - 1);
-            }
-            int lastClockValue = objectClocks.getOrDefault(objectName, -1); // Get last clock value for the object
-
-            // Check delivery eligibility for current message using objectClocks
-            if (clockValue == lastClockValue + 1) {
-                // Message can be delivered
-                // Store the message in the server using updated method
-                storeClientMessage(objectName, messageContent);
-                System.err.println("Stored Current Message: " + clockValue + " " + messageContent);
-                // After delivery of current message check if other messages with same
-                // objectName can be delivered
-                List<String> listOfMessagesThatCanBeDelivered = getListOfMessagesThatCanBeDelivered(objectName,
-                        lastClockValue);
-
-                for (String msg : listOfMessagesThatCanBeDelivered) {
-                    String[] msgParts = msg.split("#");
-                    int msgClockValue = Integer.parseInt(msgParts[1]);
-                    String msgContent = msgParts[0];
-                    storeClientMessage(objectName, msgContent);
-                    System.err.println("Storing message from Queue: " + msgClockValue + " " + msgContent);
+                if (!previouslyStoredClientMessagesList.isEmpty()) {
+                    lastStoredMessage = previouslyStoredClientMessagesList
+                            .get(previouslyStoredClientMessagesList.size() - 1);
                 }
-            } else {
-                System.err.println("Queuing current Message: " + objectName + " " + messageContent + " " + clockValue);
-                queueCurrentMessage(objectName, messageContent, clockValue);
-            }
+                int lastClockValue = objectClocks.getOrDefault(objectName, -1); // Get last clock value for the object
 
-            // Retrieve stored messages for the objectName
-            String storedMessages = getClientMessagesAsString(objectName);
-            System.err.println("Server Get MEsaages: ==== " + storedMessages);
-            out.println(storedMessages); // Send only the stored messages content
+                // Check delivery eligibility for current message using objectClocks
+                if (clockValue == lastClockValue + 1) {
+                    // Message can be delivered
+                    // Store the message in the server using updated method
+                    storeClientMessage(objectName, messageContent);
+                    System.err.println("Stored Current Message: " + clockValue + " " + messageContent);
+                    // After delivery of current message check if other messages with same
+                    // objectName can be delivered
+                    List<String> listOfMessagesThatCanBeDelivered = getListOfMessagesThatCanBeDelivered(objectName,
+                            lastClockValue);
+
+                    for (String msg : listOfMessagesThatCanBeDelivered) {
+                        String[] msgParts = msg.split("#");
+                        int msgClockValue = Integer.parseInt(msgParts[1]);
+                        String msgContent = msgParts[0];
+                        storeClientMessage(objectName, msgContent);
+                        System.err.println("Storing message from Queue: " + msgClockValue + " " + msgContent);
+                    }
+                } else {
+                    System.err.println(
+                            "Queuing current Message: " + objectName + " " + messageContent + " " + clockValue);
+                    queueCurrentMessage(objectName, messageContent, clockValue);
+                }
+
+                // Retrieve stored messages for the objectName
+                String storedMessages = getClientMessagesAsString(objectName);
+                System.err.println("Server Get MEsaages: ==== " + storedMessages);
+                out.println("ACK"); // Send only the stored messages content
+            }
+        } catch (Exception e) {
+            // If any exception occurs during message processing, send "Error"
+            System.err.println("Error processing message: " + e.getMessage());
+            out.println("Error");
         }
     }
 
@@ -375,37 +394,57 @@ class Process {
 
     // Method to load data from files when server starts up
     public synchronized void loadDataFromFile() {
+        Gson gson = new Gson();
+
+        // Load clientMessages from file
+        File clientMessagesFile = new File("clientMessages" + this.pid + ".json");
+        if (clientMessagesFile.exists()) {
+            try (Reader reader = new FileReader(clientMessagesFile)) {
+                clientMessages = gson.fromJson(reader, new TypeToken<Map<String, List<String>>>() {
+                }.getType());
+            } catch (IOException e) {
+                System.err.println("Error reading clientMessages file: " + e.getMessage());
+            }
+        } else {
+            createNewFile(clientMessagesFile);
+        }
+
+        // Load queuedMessages from file
+        File queuedMessagesFile = new File("queuedMessages" + this.pid + ".json");
+        if (queuedMessagesFile.exists()) {
+            try (Reader reader = new FileReader(queuedMessagesFile)) {
+                queuedMessages = gson.fromJson(reader, new TypeToken<Map<String, PriorityQueue<String>>>() {
+                }.getType());
+            } catch (IOException e) {
+                System.err.println("Error reading queuedMessages file: " + e.getMessage());
+            }
+        } else {
+            createNewFile(queuedMessagesFile);
+        }
+
+        // Load objectClocks from file
+        File objectClocksFile = new File("objectClocks" + this.pid + ".json");
+        if (objectClocksFile.exists()) {
+            try (Reader reader = new FileReader(objectClocksFile)) {
+                objectClocks = gson.fromJson(reader, new TypeToken<Map<String, Integer>>() {
+                }.getType());
+            } catch (IOException e) {
+                System.err.println("Error reading objectClocks file: " + e.getMessage());
+            }
+        } else {
+            createNewFile(objectClocksFile);
+        }
+    }
+
+    private void createNewFile(File file) {
         try {
-            Gson gson = new Gson();
-
-            // Load clientMessages from file
-            File clientMessagesFile = new File("clientMessages" + this.pid + ".json");
-            if (clientMessagesFile.exists()) {
-                try (Reader reader = new FileReader(clientMessagesFile)) {
-                    clientMessages = gson.fromJson(reader, new TypeToken<Map<String, List<String>>>() {
-                    }.getType());
-                }
-            }
-
-            // Load queuedMessages from file
-            File queuedMessagesFile = new File("queuedMessages" + this.pid + ".json");
-            if (queuedMessagesFile.exists()) {
-                try (Reader reader = new FileReader(queuedMessagesFile)) {
-                    queuedMessages = gson.fromJson(reader, new TypeToken<Map<String, PriorityQueue<String>>>() {
-                    }.getType());
-                }
-            }
-
-            // Load objectClocks from file
-            File objectClocksFile = new File("objectClocks" + this.pid + ".json");
-            if (objectClocksFile.exists()) {
-                try (Reader reader = new FileReader(objectClocksFile)) {
-                    objectClocks = gson.fromJson(reader, new TypeToken<Map<String, Integer>>() {
-                    }.getType());
-                }
+            if (file.createNewFile()) {
+                System.out.println("File created: " + file.getName());
+            } else {
+                System.out.println("File already exists.");
             }
         } catch (IOException e) {
-            e.printStackTrace();
+            System.err.println("Error creating the file: " + e.getMessage());
         }
     }
 
@@ -482,9 +521,24 @@ class EchoClient {
 
     // Method to send a message to the server
     public boolean sendMessage(String message) throws IOException {
+        int timeoutInMillis = 100;
         if (out != null) {
             out.println(message);
-            return true;
+            // Set a timeout for receiving replies
+            echoSocket.setSoTimeout(timeoutInMillis); // Set the timeout in milliseconds
+            try {
+                String reply = in.readLine();
+                if (reply != null && reply.equals("ACK")) {
+                    return true;
+                } else {
+                    System.err.println("NO ACK: Message: '" + message + "' couldn't be delivered");
+                    return false;
+                }
+            } catch (SocketTimeoutException e) {
+                // Handle timeout exception
+                System.err.println("Timeout: No reply received for message: '" + message + "'");
+                return false;
+            }
         } else {
             System.err.println("Connection not established. Please connect first.");
             return false;
