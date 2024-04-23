@@ -1,7 +1,3 @@
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.PrintWriter;
 import java.net.*;
 import java.security.spec.ECGenParameterSpec;
 import java.time.LocalTime;
@@ -13,6 +9,9 @@ import java.util.Map;
 import java.util.PriorityQueue;
 import java.util.Random;
 import java.time.LocalTime;
+import java.io.*;
+import com.google.gson.Gson;
+import com.google.gson.reflect.TypeToken;
 
 public class Server {
     public static void main(String[] args) throws IOException, InterruptedException {
@@ -27,6 +26,9 @@ public class Server {
         int serverPortNumber = ports[pid];
         // Creating a process object which will be shared with all the server threads
         Process process = new Process(pid);
+        // Load data from files if available
+        process.loadDataFromFile();
+
         // Creating the server on a thread
         Thread server = new MultiThreadServer(serverPortNumber, pid, process);
         server.start();
@@ -113,6 +115,10 @@ class Process {
                 // type
                 System.err.println("Invalid message type or mismatch: " + messageType);
             }
+
+            // Save data to files after processing the message
+            saveDataToFile();
+
         } catch (Exception e) {
             System.err.println("[processMessage] Exception: " + e.getMessage());
             out.println("Error");
@@ -341,6 +347,66 @@ class Process {
 
         // Add the message content and clock value to the priority queue
         queue.offer(messageContent + "#" + clockValue);
+    }
+
+    // Method to save data to files when server shuts down
+    public synchronized void saveDataToFile() {
+        try {
+            Gson gson = new Gson();
+
+            // Serialize and save clientMessages
+            try (Writer writer = new FileWriter("clientMessages" + Integer.toString(this.pid) + ".json")) {
+                gson.toJson(clientMessages, writer);
+            }
+
+            // Serialize and save queuedMessages
+            try (Writer writer = new FileWriter("queuedMessages" + Integer.toString(this.pid) + ".json")) {
+                gson.toJson(queuedMessages, writer);
+            }
+
+            // Serialize and save objectClocks
+            try (Writer writer = new FileWriter("objectClocks" + Integer.toString(this.pid) + ".json")) {
+                gson.toJson(objectClocks, writer);
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    // Method to load data from files when server starts up
+    public synchronized void loadDataFromFile() {
+        try {
+            Gson gson = new Gson();
+
+            // Load clientMessages from file
+            File clientMessagesFile = new File("clientMessages" + this.pid + ".json");
+            if (clientMessagesFile.exists()) {
+                try (Reader reader = new FileReader(clientMessagesFile)) {
+                    clientMessages = gson.fromJson(reader, new TypeToken<Map<String, List<String>>>() {
+                    }.getType());
+                }
+            }
+
+            // Load queuedMessages from file
+            File queuedMessagesFile = new File("queuedMessages" + this.pid + ".json");
+            if (queuedMessagesFile.exists()) {
+                try (Reader reader = new FileReader(queuedMessagesFile)) {
+                    queuedMessages = gson.fromJson(reader, new TypeToken<Map<String, PriorityQueue<String>>>() {
+                    }.getType());
+                }
+            }
+
+            // Load objectClocks from file
+            File objectClocksFile = new File("objectClocks" + this.pid + ".json");
+            if (objectClocksFile.exists()) {
+                try (Reader reader = new FileReader(objectClocksFile)) {
+                    objectClocks = gson.fromJson(reader, new TypeToken<Map<String, Integer>>() {
+                    }.getType());
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
     }
 
     public static int djb2Hash(String str) {
