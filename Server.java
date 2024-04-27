@@ -12,17 +12,27 @@ import java.time.LocalTime;
 import java.io.*;
 import com.google.gson.Gson;
 import com.google.gson.reflect.TypeToken;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 public class Server {
+
+    // Define class-level variables for hostNames, ports, and pid
+    private static String[] hostNames = { "127.0.0.1", "127.0.0.1", "127.0.0.1", "127.0.0.1", "127.0.0.1", "127.0.0.1",
+            "127.0.0.1" };
+    private static int[] ports = { 6001, 6002, 6003, 6004, 6005, 6006, 6007 };
+    private static int pid;
+
+    // Define a boolean array to store the status of each server
+    static boolean[] serverStatus = new boolean[7]; // Assuming 7 servers
+
     public static void main(String[] args) throws IOException, InterruptedException {
         if (args.length != 1 && Integer.parseInt(args[0]) >= 0 && Integer.parseInt(args[0]) < 7) {
             System.err.println("Usage: java Server <which port number to use [0-3]>");
             System.exit(1);
         }
-        int[] ports = { 6001, 6002, 6003, 6004, 6005, 6006, 6007 };
-        String[] hostNames = { "127.0.0.1", "127.0.0.1", "127.0.0.1", "127.0.0.1", "127.0.0.1", "127.0.0.1",
-                "127.0.0.1" };
-        int pid = Integer.parseInt(args[0]);
+        pid = Integer.parseInt(args[0]); // Initialize pid
         int serverPortNumber = ports[pid];
         // Creating a process object which will be shared with all the server threads
         Process process = new Process(pid);
@@ -36,17 +46,29 @@ public class Server {
         String s = br.readLine();
         // Process waits for 10secs before broadcasting messages to each server
         Thread.sleep(10000);
-        // Connecting with servers
+        // Initial Connection with servers
         List<EchoClient> clients = new ArrayList<>();
 
         for (int i = 0; i < hostNames.length; i++) {
             if (i != pid) { // Assuming 'pid' is the ID of the current server
-                EchoClient client = new EchoClient(i);
-                client.connect(hostNames[i], ports[i]);
-                // client.handleMessages();
-                clients.add(client); // Add the client to the list
+                EchoClient client = new EchoClient(i, serverStatus);
+                try {
+                    client.connect(hostNames[i], ports[i]);
+                    clients.add(client); // Add the client to the list
+                    serverStatus[i] = true; // Mark the server as "up"
+                } catch (IOException e) {
+                    // Handle connection failure
+                    System.err.println("Failed to connect with Server " + i);
+                    serverStatus[i] = false; // Mark the server as "down"
+                }
             }
         }
+
+        // System.out.println("List of EchoClients:");
+        // for (EchoClient client : clients) {
+        // System.out.println(client.pid);
+        // }
+
         ClientProcess clientProcess = new ClientProcess(pid, clients);
         process.setConnectedServers(clientProcess);
 
@@ -54,16 +76,71 @@ public class Server {
         for (EchoClient client : clients) {
             client.setClientProcess(clientProcess);
         }
-        LocalTime ctime = LocalTime.now();
+
+        // Method to update current server replica when restarted with missing data from
+        // all other replicas.
+        // We send all the other replicas of a particular object the current
+        // server+object clock value and wait for return of
+        // new messages (if any) at that replica. The current server then saves the
+        // newer messages
+        process.updateCurrentServerReplicaWithMissingData();
+
+        // Start the periodic reconnection task
+        ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
+        scheduler.scheduleAtFixedRate(() -> reconnectWithDownServers(clients), 0, 15, TimeUnit.SECONDS);
+
+        LocalTime currentTime = LocalTime.now();
         // Test: Send messages to servers
         // for (EchoClient client : clients) {
 
         // client.sendMessage("SERVER&" + Integer.toString(client.clientProcess.myPID) +
         // "test"
-        // + Integer.toString(ports[client.clientProcess.myPID]) + " " + ctime);
+        // + Integer.toString(ports[client.clientProcess.myPID]) + " " + currentTime);
         // }
 
     }
+
+    public static void reconnectWithDownServers(List<EchoClient> clients) {
+        System.err.println("Trying to reconnect");
+        for (int i = 0; i < serverStatus.length; i++) {
+            System.out.print("Server " + i + " status: " + serverStatus[i] + ", ");
+        }
+        System.err.println();
+
+        for (int i = 0; i < hostNames.length; i++) {
+            if (i != pid && !serverStatus[i]) { // Check if the server is not the current server and is marked as down
+                // Attempt connection with server i
+                System.err.println("Trying to reconnect with server: " + i);
+                try {
+                    String hostName = hostNames[i];
+                    int portNumber = ports[i];
+                    EchoClient client = new EchoClient(i, serverStatus);
+                    client.connect(hostName, portNumber);
+                    System.out.println("[reconnectWithDownServers] Pid: " + client.pid + " i: " + i);
+                    // If connection successful, update server status and replace the existing
+                    // client in the list
+                    serverStatus[i] = true;
+                    // Replace the existing client in the list with the new client
+                    int index = i;
+                    if (i >= pid) {
+                        index -= 1;
+                    }
+                    clients.set(index, client);
+
+                    System.out.println("Reconnected with Server " + index);
+                } catch (IOException e) {
+                    // Handle connection failure
+                    System.err.println("IOException: Failed to reconnect with Server " + i + ": " + e.getMessage());
+                    e.printStackTrace();
+                    // Optionally, you can log the exception or perform additional actions
+                } catch (Exception e) {
+                    System.err.println("Failed to reconnect with Server " + i + ": " + e.getMessage());
+                    e.printStackTrace();
+                }
+            }
+        }
+    }
+
 }
 
 class Process {
@@ -88,10 +165,52 @@ class Process {
         this.connectedServers = clientProcess;
     }
 
+    public synchronized void updateCurrentServerReplicaWithMissingData() {
+        for (Map.Entry<String, Integer> entry : this.objectClocks.entrySet()) {
+            String objectName = entry.getKey();
+            int clockValue = entry.getValue();
+            System.err.println("[updateCurrentServerReplicaWithMissingData] Objectname: " + objectName + "clockValue: "
+                    + clockValue);
+
+            int serverIndex = Math.abs(djb2Hash(objectName)) % 7;
+            System.err.println("Sending Update Replica message to other servers: ServerIndex: " + serverIndex);
+
+            String handshakeMessage = "HANDSHAKE&" + Integer.toString(this.pid) + "#" + Integer.toString(clockValue)
+                    + "#" + objectName;
+
+            System.err.println("Handshake message: " + handshakeMessage);
+
+            for (int i = 0; i < this.connectedServers.clients.size(); i++) {
+                int index = i;
+                if (i >= this.pid) {
+                    index++;
+                }
+                EchoClient client = this.connectedServers.clients.get(i);
+                // send message to other 2 replicas. We don't know which replica current server
+                // is wrt to serverIndex
+                System.err.println("Server Index:: " + serverIndex + ", i: " + i + ", index: " + index
+                        + ", client.pid: " + client.pid);
+                if ((client.pid == serverIndex) || (client.pid == (serverIndex + 2) % 7)
+                        || (client.pid == (serverIndex + 4) % 7)) {
+                    System.err.println("Sending Message to : " + client.pid + " with index: " + index);
+                    boolean reply = client.sendMessage(handshakeMessage);
+                    if (reply == true) {
+                        System.err.println("Handshake Message Delivered Successfully");
+                    } else {
+                        System.err.println("Handshake Message Could Not Be Delivered");
+                    }
+                }
+            }
+
+        }
+    }
+
     public synchronized void processMessage(PrintWriter out, String msg) throws IOException {
         try {
             System.err.println("[processMessage] Received MSG: " + msg + " " + this.pid);
-
+            // if (this.pid == 3) {
+            // this.connectedServers.clients.get(5).out.println("HELLO ");
+            // }
             // Split the message based on "&" to differentiate between client and server
             // messages
             String[] parts = msg.split("&");
@@ -110,6 +229,8 @@ class Process {
                 processClientMessage(out, content);
             } else if (messageType.equals("SERVER")) {
                 processServerMessage(out, content);
+            } else if (messageType.equals(("HANDSHAKE"))) {
+                processHandshakeMessage(out, content);
             } else {
                 // Handle invalid message type or mismatch between message type and connection
                 // type
@@ -125,6 +246,104 @@ class Process {
         }
 
         // out.println(msg); // Echo the message back to the sender
+    }
+
+    // Process the handshake message received
+    public synchronized void processHandshakeMessage(PrintWriter out, String content) {
+        try {
+            String[] parts = content.split("#");
+            if (parts.length == 3) {
+                int senderServerId = Integer.parseInt(parts[0]);
+                int receivedClockValue = Integer.parseInt(parts[1]);
+                String objectName = parts[2];
+
+                // Example: Print the parsed values
+                System.out.println("Handshake message from Server ID " + senderServerId + ":");
+                System.out.println("Received Clock Value: " + receivedClockValue);
+                System.out.println("Object Name: " + objectName);
+
+                // Get the current clock value for the object
+                int currentClockValue = objectClocks.getOrDefault(objectName, -1);
+                System.err.println("Current Clock Value: " + currentClockValue);
+
+                // If the current clock value is smaller or equal to the received clock value,
+                // return
+                if (currentClockValue <= receivedClockValue) {
+                    System.out.println("Current clock value for object " + objectName
+                            + " is smaller or equal to received clock value." + " Current Clock Value: "
+                            + currentClockValue + " Received Clock Value: " + receivedClockValue);
+                    out.println("ACK");
+                    return;
+                }
+
+                // If the current clock value is larger than the received clock value, send
+                // missing messages
+                System.out.println("Continuing Processing...Current clock value for object " + objectName
+                        + " is larger than received clock value. Sending missing messages...");
+
+                // Make sure there is connection between this server and the handshaking server
+                // A connection in which this server acts as client and that server acts as
+                // server
+                if (Server.serverStatus[senderServerId] != false) {
+                    Server.serverStatus[senderServerId] = false;
+                    Server.reconnectWithDownServers(this.connectedServers.clients);
+                }
+
+                // Iterate through the stored messages for the object
+                List<String> messages = getClientMessages(objectName);
+                int handshakeReplySuccessCount = 0;
+                for (String msg : messages) {
+                    String[] msgParts = msg.split("#");
+                    String msgContent = msgParts[0];
+                    int msgClockValue = Integer.parseInt(msgParts[1]);
+
+                    // Check if the message clock value is between the received and current clock
+                    // values
+                    if (msgClockValue > receivedClockValue) {
+                        // Send the message to the server requesting handshake
+                        String handshakeReplyMessage = "SERVER&" + Integer.toString(this.pid) + "#W#"
+                                + Integer.toString(msgClockValue) + "#" + objectName + "#" + msgContent;
+                        for (EchoClient client : this.connectedServers.clients) {
+                            if (client.pid == senderServerId) {
+                                System.err.println("Sending Handshake Reply Message to : " + client.pid
+                                        + " Reply Message: " + handshakeReplyMessage);
+                                boolean reply = client.sendMessage(handshakeReplyMessage);
+                                if (reply == true) {
+                                    handshakeReplySuccessCount++;
+                                    System.err.println("Handshake Reply Delivered Successfully");
+                                } else {
+                                    System.err.println("Handshake Reply Not Delivered");
+                                }
+                            } else {
+                                System.err.println(
+                                        "Client ID: " + client.pid
+                                                + " Not Sending Handshake Reply as different Client");
+                            }
+                        }
+                    }
+                }
+                System.err.println("handshakeReplySuccessCount: " + handshakeReplySuccessCount
+                        + "(currentClockValue - receivedClockValue)"
+                        + (Integer.toString((currentClockValue - receivedClockValue))));
+                // After sending all newer messages back as Handshake Reply
+                if (handshakeReplySuccessCount == (currentClockValue - receivedClockValue)) {
+                    System.err.println("Sending ACK as SuccessCount Reached");
+                    out.println("ACK");
+                } else {
+                    System.err.println("Sending Error as SuccessCount Not Reached");
+                    out.println("Error");
+                }
+            } else {
+                // If the handshake message format is incorrect, send "Error"
+                System.err.println("[processHandshakeMessage]: Error: Invalid message format");
+                out.println("Error: Invalid message format");
+            }
+        } catch (Exception e) {
+            // If any exception occurs during message processing, send "Error"
+            System.err.println("Error processing handshake message: " + e.getMessage());
+            e.printStackTrace();
+            out.println("Error");
+        }
     }
 
     // Process client message
@@ -144,7 +363,12 @@ class Process {
                 System.out.println("Message Content: " + messageContent);
 
                 // Update the clock value for the object after storing the message
-                int newClockValue = objectClocks.getOrDefault(objectName, 0);
+                int newClockValue = objectClocks.getOrDefault(objectName, -1);
+                // Increment clockvalue first as the clock value in objectClocks is of the last
+                // saved message.
+                // When saving the objectClocks in file, we increment and save bringing it at
+                // the same level as the latest saved message
+                newClockValue++;
                 String serverMessage = "SERVER&" + Integer.toString(this.pid) + "#W#" + Integer.toString(newClockValue)
                         + "#" + objectName
                         + "#" + messageContent;
@@ -197,7 +421,11 @@ class Process {
 
                 // Retrieve stored messages for the objectName
                 String storedMessages = getClientMessagesAsString(objectName);
-                out.println(storedMessages); // Send only the stored messages content
+                if (storedMessages.isEmpty()) {
+                    out.println("Error");
+                } else {
+                    out.println(storedMessages); // Send only the stored messages content
+                }
 
             } else {
                 out.println("Error");
@@ -268,22 +496,32 @@ class Process {
                 String objectName = parts[3];
                 String messageContent = parts[4];
 
+                int lastClockValue = objectClocks.getOrDefault(objectName, -1); // Get last clock value for the object
+                // If the received message clock is equal to or less than the current server
+                // clock, skip processing
+                if (clockValue <= lastClockValue) {
+                    System.err.println("Received message clock for object " + objectName
+                            + " is equal to or less than the current server clock. Skipping processing.");
+                    out.println("ACK"); // Send acknowledgment to the sender
+                    return;
+                }
+
                 // Example: Print the parsed values
                 System.out.println("Client message from PID " + clientPid + ":");
                 System.out.println("Clock Value: " + clockValue);
                 System.out.println("Object Name: " + objectName);
                 System.out.println("Message Content: " + messageContent);
 
-                // Get stored client messages in the given object
-                List<String> previouslyStoredClientMessagesList = getClientMessages(objectName);
+                // // Get stored client messages in the given object
+                // List<String> previouslyStoredClientMessagesList =
+                // getClientMessages(objectName);
 
-                String lastStoredMessage = null; // Initialize to null
+                // String lastStoredMessage = null; // Initialize to null
 
-                if (!previouslyStoredClientMessagesList.isEmpty()) {
-                    lastStoredMessage = previouslyStoredClientMessagesList
-                            .get(previouslyStoredClientMessagesList.size() - 1);
-                }
-                int lastClockValue = objectClocks.getOrDefault(objectName, -1); // Get last clock value for the object
+                // if (!previouslyStoredClientMessagesList.isEmpty()) {
+                // lastStoredMessage = previouslyStoredClientMessagesList
+                // .get(previouslyStoredClientMessagesList.size() - 1);
+                // }
 
                 // Check delivery eligibility for current message using objectClocks
                 if (clockValue == lastClockValue + 1) {
@@ -308,7 +546,6 @@ class Process {
                             "Queuing current Message: " + objectName + " " + messageContent + " " + clockValue);
                     queueCurrentMessage(objectName, messageContent, clockValue);
                 }
-
                 // Retrieve stored messages for the objectName
                 String storedMessages = getClientMessagesAsString(objectName);
                 System.err.println("Server Get MEsaages: ==== " + storedMessages);
@@ -385,6 +622,7 @@ class Process {
 
             // Serialize and save objectClocks
             try (Writer writer = new FileWriter("objectClocks" + Integer.toString(this.pid) + ".json")) {
+                System.out.println("Loaded objectClocks from file: " + objectClocks);
                 gson.toJson(objectClocks, writer);
             }
         } catch (IOException e) {
@@ -402,6 +640,7 @@ class Process {
             try (Reader reader = new FileReader(clientMessagesFile)) {
                 clientMessages = gson.fromJson(reader, new TypeToken<Map<String, List<String>>>() {
                 }.getType());
+                System.out.println("Loaded clientMessages from file: " + clientMessages);
             } catch (IOException e) {
                 System.err.println("Error reading clientMessages file: " + e.getMessage());
             }
@@ -415,6 +654,7 @@ class Process {
             try (Reader reader = new FileReader(queuedMessagesFile)) {
                 queuedMessages = gson.fromJson(reader, new TypeToken<Map<String, PriorityQueue<String>>>() {
                 }.getType());
+                System.out.println("Loaded queuedMessages from file: " + queuedMessages);
             } catch (IOException e) {
                 System.err.println("Error reading queuedMessages file: " + e.getMessage());
             }
@@ -428,6 +668,7 @@ class Process {
             try (Reader reader = new FileReader(objectClocksFile)) {
                 objectClocks = gson.fromJson(reader, new TypeToken<Map<String, Integer>>() {
                 }.getType());
+                System.out.println("Loaded objectClocks from file: " + objectClocks);
             } catch (IOException e) {
                 System.err.println("Error reading objectClocks file: " + e.getMessage());
             }
@@ -488,14 +729,17 @@ class ClientProcess {
 // This class acts as the client side of the other server connections.
 class EchoClient {
     private Socket echoSocket;
-    private PrintWriter out;
+    PrintWriter out;
     private BufferedReader in;
     public ClientProcess clientProcess;
     // this is the PID of the Server that this server is connected to.
     int pid;
 
-    public EchoClient(int pid) {
+    private boolean[] serverStatus; // Array to store the status of each server
+
+    public EchoClient(int pid, boolean[] serverStatus) {
         this.pid = pid;
+        this.serverStatus = serverStatus;
     }
 
     public void setClientProcess(ClientProcess clientProcess) {
@@ -507,42 +751,83 @@ class EchoClient {
         System.out.println("Connecting with Server....");
         try {
             echoSocket = new Socket(hostName, portNumber);
-            out = new PrintWriter(echoSocket.getOutputStream(), true);
-            in = new BufferedReader(new InputStreamReader(echoSocket.getInputStream()));
+            this.out = new PrintWriter(echoSocket.getOutputStream(), true);
+            this.in = new BufferedReader(new InputStreamReader(echoSocket.getInputStream()));
             System.out.println("Connection with server complete");
         } catch (UnknownHostException e) {
             System.err.println("Don't know about host " + hostName);
-            System.exit(1);
-        } catch (IOException e) {
-            System.err.println("Couldn't get I/O for the connection to " + hostName);
             System.exit(1);
         }
     }
 
     // Method to send a message to the server
-    public boolean sendMessage(String message) throws IOException {
+    public boolean sendMessage(String message) {
         int timeoutInMillis = 100;
-        if (out != null) {
+        try {
+            if (out == null) {
+
+                serverStatus[pid] = false;
+                System.err.println("Connection not established. Please connect first.");
+                return false;
+            }
+
             out.println(message);
             // Set a timeout for receiving replies
             echoSocket.setSoTimeout(timeoutInMillis); // Set the timeout in milliseconds
-            try {
-                String reply = in.readLine();
-                if (reply != null && reply.equals("ACK")) {
-                    return true;
-                } else {
-                    System.err.println("NO ACK: Message: '" + message + "' couldn't be delivered");
-                    return false;
-                }
-            } catch (SocketTimeoutException e) {
-                // Handle timeout exception
-                System.err.println("Timeout: No reply received for message: '" + message + "'");
+
+            String reply = in.readLine();
+
+            if (reply == null) {
+                serverStatus[pid] = false;
+                System.err.println("NULL Replay: Message: '" + message + "' couldn't be delivered. Check connection");
                 return false;
             }
-        } else {
-            System.err.println("Connection not established. Please connect first.");
+            if (reply.equals("ACK")) {
+                System.err.println("ACK: Returning True from sendMessage");
+                return true;
+            } else {
+                System.err.println("NO ACK: Message: '" + message + "' couldn't be delivered. Reply: " + reply);
+                return false;
+            }
+
+        } catch (SocketTimeoutException e) {
+            // Handle timeout exception
+            System.err.println("Timeout: No reply received for message: '" + message + "'");
+            serverStatus[pid] = false;
+            return false;
+        } catch (IOException e) {
+            // Handle IOException (e.g., connection failure or writing failure)
+            System.err.println("Error sending message: '" + message + "'");
+            // If there's an IOException, mark the server as down
+            serverStatus[pid] = false;
+            // Close the connection
+            try {
+                closeConnection();
+            } catch (IOException e1) {
+                // Handle the error gracefully or log it
+                System.err.println("[sendMessage]: IOException " + e.getMessage());
+                e1.printStackTrace();
+            }
+            return false;
+        } catch (Exception e) {
+            // Handle any other unexpected exceptions
+            System.err.println("[sendMessage]: Exception " + e.getMessage());
+            e.printStackTrace();
+
+            // Add debug information for variables
+            System.err.println("Debug information:");
+            System.err.println("pid: " + pid);
+            if (serverStatus != null) {
+                System.err.println("serverStatus length: " + serverStatus.length);
+            } else {
+                System.err.println("serverStatus is null");
+            }
+
+            serverStatus[pid] = false; // This line might be causing the NullPointerException
+
             return false;
         }
+
     }
 
     // Method to close the connection
@@ -681,6 +966,11 @@ class ConnectionHandler extends Thread {
                 process.processMessage(out, received);
             } catch (IOException | InterruptedException e) {
                 e.printStackTrace();
+                break;
+            } catch (Exception e) {
+                System.err.println("[ConnectionHandler] Exception: " + e.getMessage());
+                e.printStackTrace();
+                break;
             }
         }
 

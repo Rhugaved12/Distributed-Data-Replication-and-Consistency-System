@@ -2,6 +2,7 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
+import java.net.ConnectException;
 import java.net.Socket;
 import java.util.Random;
 
@@ -10,7 +11,7 @@ public class Client {
     int pid;
 
     public static void main(String[] args) throws IOException {
-        if (args.length != 1 && Integer.parseInt(args[0]) >= 0 && Integer.parseInt(args[0]) < 4) {
+        if (args.length != 1 || Integer.parseInt(args[0]) < 0 || Integer.parseInt(args[0]) >= 4) {
             System.err.println("Usage: java Client <which pid to use [0-3]>");
             System.exit(1);
         }
@@ -36,6 +37,10 @@ public class Client {
             Random random = new Random();
             int msgNo = 0;
             while (msgNo < 100) {
+                if (msgNo % 25 == 0) {
+                    System.err.println("Waiting for input: ");
+                    wait = stdIn.readLine();
+                }
                 if (msgNo % 5 == 0)
                     objectName = "object5";
                 else if (msgNo % 3 == 0)
@@ -59,61 +64,67 @@ public class Client {
                 String operation = "write";
 
                 // For any operation, let the client connect to any of the 3 replicas and let
-                // the replicas figure out if they can connect with atleast 1 more server when
+                // the replicas figure out if they can connect with at least 1 more server when
                 // writing/inserting. For read, just need to connect with 1 server
+                boolean connected = false;
                 for (int i = 0; i <= 4; i = i + 2) {
                     int serverIndex = (Math.abs(djb2Hash(objectName)) + i) % 7; // Select a server based on DJB2 hash
                     System.err.println("Server Hashed Index: " + serverIndex);
                     String serverAddress = hostNames[serverIndex];
                     int serverPort = ports[serverIndex];
+                    try {
+                        socket = new Socket(serverAddress, serverPort);
+                        out = new PrintWriter(socket.getOutputStream(), true);
+                        in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
 
-                    socket = new Socket(serverAddress, serverPort);
-                    out = new PrintWriter(socket.getOutputStream(), true);
-                    in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+                        System.out.println("Connected to server " + serverAddress + ":" + serverPort);
 
-                    System.out.println("Connected to server " + serverAddress + ":" + serverPort);
-
-                    // Send messages to the server based on user's choice
-                    String message;
-                    if (operation.equals("write")) {
-                        message = createWriteMessage(stdIn, userInput, objectName);
-                    } else if (operation.equals("read")) {
-                        message = createReadMessage(stdIn);
-                    } else {
-                        System.err.println("Invalid operation. Please enter 'read' or 'write'.");
-                        continue;
-                    }
-
-                    // if (i == 0) {
-                    // message = "Test";
-                    // }
-                    out.println(message);
-                    System.out.println("Message sent to server: " + message);
-
-                    // Receive and print server response
-                    String serverResponse = in.readLine();
-                    System.out.println("Server response: " + serverResponse);
-
-                    if (serverResponse.equals("Error")) {
-                        System.err.println("Connecting with the next replica...");
-                    } else {
+                        // Send messages to the server based on user's choice
+                        String message;
                         if (operation.equals("write")) {
-                            clock++;
+                            message = createWriteMessage(stdIn, userInput, objectName);
+                        } else if (operation.equals("read")) {
+                            message = createReadMessage(stdIn);
+                        } else {
+                            System.err.println("Invalid operation. Please enter 'read' or 'write'.");
+                            continue;
                         }
-                        if (out != null) {
-                            out.close();
+
+                        // if (i == 0) {
+                        // message = "Test";
+                        // }
+                        out.println(message);
+                        System.out.println("Message sent to server: " + message);
+
+                        // Receive and print server response
+                        String serverResponse = in.readLine();
+                        System.out.println("Server response: " + serverResponse);
+
+                        if (serverResponse.equals("Error")) {
+                            System.err.println("Connecting with the next replica...");
+                        } else {
+                            if (operation.equals("write")) {
+                                clock++;
+                            }
+                            connected = true;
+                            break;
                         }
-                        if (in != null) {
-                            in.close();
-                        }
-                        break;
+                    } catch (ConnectException e) {
+                        // Server connection failed, try next server
+                        System.err.println("Connection to server " + serverAddress + ":" + serverPort + " failed.");
                     }
+                }
+                if (!connected) {
+                    System.err.println("Unable to connect to any server. Skipping message.");
                 }
             }
         } catch (IOException e) {
-            System.err.println("Error: " + e.getMessage());
+            System.err.println("IOException: " + e.getMessage());
         } catch (InterruptedException e) {
-            // TODO Auto-generated catch block
+            System.err.println("InterruptedException: " + e.getMessage());
+            e.printStackTrace();
+        } catch (Exception e) {
+            System.err.println("Exception: " + e.getMessage());
             e.printStackTrace();
         } finally {
             // Close resources
